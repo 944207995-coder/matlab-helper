@@ -16,10 +16,34 @@ import tempfile
 import pythoncom
 import win32com.client
 
-DEEPSEEK_API_KEY = "sk-0b3c225c33864b98a3055476272eee00"
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-MODEL = "deepseek-v4-flash"
-MATLAB_PATH = r"D:\MATLAB R2025a(64bit)\1\bin\matlab.exe"
+_BASE_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+CONFIG_FILE = os.path.join(_BASE_DIR, "config.json")
+
+DEFAULT_CONFIG = {
+    "api_key": "sk-0b3c225c33864b98a3055476272eee00",
+    "api_url": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-v4-flash",
+    "matlab_path": r"D:\MATLAB R2025a(64bit)\1\bin\matlab.exe"
+}
+
+CONFIG = {}
+
+def load_config():
+    global CONFIG
+    if os.path.isfile(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            CONFIG = json.load(f)
+    else:
+        CONFIG = dict(DEFAULT_CONFIG)
+        save_config()
+    for k, v in DEFAULT_CONFIG.items():
+        CONFIG.setdefault(k, v)
+
+def save_config():
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+
+load_config()
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -53,18 +77,67 @@ SYSTEM_PROMPT = """你是一个 MATLAB 代码翻译专家。用户输入汉语�
 示例：画一条红色虚线 → plot(x, y, 'r--')"""
 
 def call_deepseek(text):
-    payload = {"model": MODEL, "messages": [
+    payload = {"model": CONFIG["model"], "messages": [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": text}
     ], "max_tokens": 2048, "temperature": 0.1}
-    req = urllib.request.Request(DEEPSEEK_URL,
+    req = urllib.request.Request(CONFIG["api_url"],
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {DEEPSEEK_API_KEY}"})
+                 "Authorization": f"Bearer {CONFIG['api_key']}"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         content = json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]["content"]
     blocks = re.findall(r"```(?:matlab)?\s*\n?(.*?)```", content, re.DOTALL)
     return (blocks[0] if blocks else content).strip()
+
+
+class SettingsDialog(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("设置")
+        self.geometry("520x350")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        ctk.CTkLabel(self, text="API 设置", font=ctk.CTkFont(size=16, weight="bold"),
+                     anchor="w").pack(fill="x", padx=20, pady=(15, 5))
+
+        fields = [
+            ("API Key", "api_key", True),
+            ("API URL", "api_url", False),
+            ("模型名称", "model", False),
+        ]
+        self.entries = {}
+        for label, key, show in fields:
+            ctk.CTkLabel(self, text=label, font=ctk.CTkFont(size=13),
+                         anchor="w").pack(fill="x", padx=20, pady=(6, 0))
+            e = ctk.CTkEntry(self, font=ctk.CTkFont(size=13), show="*" if show else "")
+            e.insert(0, CONFIG.get(key, ""))
+            e.pack(fill="x", padx=20, pady=(2, 0))
+            self.entries[key] = e
+
+        ctk.CTkLabel(self, text="MATLAB 路径", font=ctk.CTkFont(size=16, weight="bold"),
+                     anchor="w").pack(fill="x", padx=20, pady=(15, 5))
+        self.matlab_entry = ctk.CTkEntry(self, font=ctk.CTkFont(size=13))
+        self.matlab_entry.insert(0, CONFIG.get("matlab_path", ""))
+        self.matlab_entry.pack(fill="x", padx=20, pady=(2, 0))
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(20, 10))
+        ctk.CTkButton(btn_frame, text="保存", command=self.on_save,
+                      font=ctk.CTkFont(size=14, weight="bold"), width=100).pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="取消", command=self.destroy,
+                      fg_color="#3b3b3b", hover_color="#555555", width=100).pack(side="left", padx=4)
+
+    def on_save(self):
+        for key, entry in self.entries.items():
+            CONFIG[key] = entry.get().strip()
+        CONFIG["matlab_path"] = self.matlab_entry.get().strip()
+        save_config()
+        self.parent._check_matlab()
+        self.destroy()
 
 
 class MatlabHelperApp(ctk.CTk):
@@ -100,6 +173,8 @@ class MatlabHelperApp(ctk.CTk):
         for t, c in [("🔄 重新生成", self.on_regenerate), ("📋 复制代码", self.on_copy), ("🗑 清空", self.on_clear)]:
             ctk.CTkButton(btn_frame, text=t, command=c, width=100,
                           fg_color="#3b3b3b", hover_color="#555555").pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="⚙ 设置", command=self.on_settings,
+                      width=80, fg_color="#2d4a6b", hover_color="#3a5f8a").pack(side="right", padx=4)
 
         ctk.CTkLabel(self, text="MATLAB 代码：",
                      font=ctk.CTkFont(size=13, weight="bold"), anchor="w")\
@@ -138,8 +213,8 @@ class MatlabHelperApp(ctk.CTk):
         self.status_bar.pack(fill="x", padx=20, pady=(4, 10))
 
     def _check_matlab(self):
-        if not os.path.isfile(MATLAB_PATH):
-            self.status_bar.configure(text="⚠ MATLAB 未找到，请检查安装路径", text_color="#ff6b6b")
+        if not os.path.isfile(CONFIG["matlab_path"]):
+            self.status_bar.configure(text="⚠ MATLAB 未找到，请在设置中配置路径", text_color="#ff6b6b")
             self.run_btn.configure(state="disabled")
         else:
             self.status_bar.configure(text="MATLAB 已就绪 | 输入汉语 → 点击运行", text_color="#69db7c")
@@ -230,6 +305,7 @@ class MatlabHelperApp(ctk.CTk):
         self.result_text.configure(state="disabled")
 
     def on_regenerate(self): self.on_run()
+    def on_settings(self): SettingsDialog(self)
     def on_copy(self):
         self.code_text.configure(state="normal")
         c = self.code_text.get("1.0", "end-1c").strip()
